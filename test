@@ -6,12 +6,13 @@ import numpy as np
 # -----------------------------
 df = pd.read_csv("claims.csv")
 
-# Only audited claims
-audited = df[~df['find'].isna()].copy()  # 'find' is NaN for unaudited
+# Identify audited vs non-audited
+audited = df[~df['find'].isna()].copy()   # SME-selected
+unaudited = df[df['find'].isna()].copy()  # non-SME
 
 # Dx/Proc columns
-dx_cols = [f'diag{i}' for i in range(1,7)]   # diag1–6
-proc_cols = [f'proc{i}' for i in range(1,7)] # proc1–6
+dx_cols = [f'diag{i}' for i in range(1,7)]
+proc_cols = [f'proc{i}' for i in range(1,7)]
 
 # -----------------------------
 # Step 0: Bin numeric features
@@ -19,10 +20,12 @@ proc_cols = [f'proc{i}' for i in range(1,7)] # proc1–6
 los_bins = [0,2,5,10,15,1000]
 los_labels = ['VeryShort','Short','Medium','Long','VeryLong']
 audited['LOS_bin'] = pd.cut(audited['los'], bins=los_bins, labels=los_labels)
+unaudited['LOS_bin'] = pd.cut(unaudited['los'], bins=los_bins, labels=los_labels)
 
 paid_bins = [0,10000,50000,100000,1000000]
 paid_labels = ['Low','Medium','High','VeryHigh']
 audited['Paid_bin'] = pd.cut(audited['totalpaidamount'], bins=paid_bins, labels=paid_labels)
+unaudited['Paid_bin'] = pd.cut(unaudited['totalpaidamount'], bins=paid_bins, labels=paid_labels)
 
 # -----------------------------
 # Step 1: Helper function to create patterns
@@ -36,69 +39,90 @@ def make_pattern(row, dx_cols=[], proc_cols=[], include_proc=False):
     return "_".join(parts)
 
 # -----------------------------
-# Step 2: Create pattern columns based on priority table
+# Step 2: Create patterns for audited data
 # -----------------------------
-
-# Priority 1
 audited['Pattern_Basic'] = audited.apply(lambda x: make_pattern(x), axis=1)
 audited['Pattern_Standard'] = audited.apply(lambda x: make_pattern(x, dx_cols=['diag1']), axis=1)
-
-# Priority 2
 audited['Pattern_Dx'] = audited.apply(lambda x: make_pattern(x, dx_cols=dx_cols), axis=1)
 audited['Pattern_Full'] = audited.apply(lambda x: make_pattern(x, dx_cols=dx_cols, proc_cols=proc_cols, include_proc=True), axis=1)
-audited['Pattern_Client'] = audited.apply(lambda x: str(x['clientname']) + "_" + make_pattern(x), axis=1)
-
-# Priority 4
 audited['Pattern_LOS'] = audited.apply(lambda x: str(x['soi_indicator']) + "_" + str(x['dischargestatuscode']) + "_" + str(x['LOS_bin']), axis=1)
 audited['Pattern_Paid'] = audited.apply(lambda x: str(x['soi_indicator']) + "_" + str(x['dischargestatuscode']) + "_" + str(x['Paid_bin']), axis=1)
 audited['Pattern_LOS_Paid'] = audited.apply(lambda x: str(x['soi_indicator']) + "_" + str(x['dischargestatuscode']) + "_" + str(x['LOS_bin']) + "_" + str(x['Paid_bin']), axis=1)
 
-print("✅ All pattern columns created (no loadmonth)")
-
-# -----------------------------
-# Step 3: Compute Support, HitRate, Lift per client
-# -----------------------------
 pattern_cols = [
     'Pattern_Basic','Pattern_Standard','Pattern_Dx','Pattern_Full',
-    'Pattern_Client','Pattern_LOS','Pattern_Paid','Pattern_LOS_Paid'
+    'Pattern_LOS','Pattern_Paid','Pattern_LOS_Paid'
 ]
 
-all_stats = []
+# -----------------------------
+# Step 3: Global patterns (all clients combined)
+# -----------------------------
+global_stats = []
+
+for pat_col in pattern_cols:
+    stats = audited.groupby(pat_col).agg(
+        Total=('find','count'),
+        Hits=('find','sum')
+    ).reset_index()
+    overall_hit_rate = audited['find'].mean()
+    stats['Support'] = stats['Total'] / len(audited)
+    stats['HitRate'] = stats['Hits'] / stats['Total']
+    stats['Lift'] = stats['HitRate'] / overall_hit_rate if overall_hit_rate > 0 else 0
+    stats['Pattern_Type'] = pat_col
+    stats['Client'] = 'ALL'
+    global_stats.append(stats)
+
+global_stats_df = pd.concat(global_stats, axis=0)
+
+# -----------------------------
+# Step 4: Client-specific patterns
+# -----------------------------
+client_stats = []
 
 for client in audited['clientname'].unique():
     client_data = audited[audited['clientname'] == client].copy()
     overall_hit_rate = client_data['find'].mean()
-    total_client = len(client_data)
     
     for pat_col in pattern_cols:
         stats = client_data.groupby(pat_col).agg(
             Total=('find','count'),
             Hits=('find','sum')
         ).reset_index()
-        stats['Support'] = stats['Total'] / total_client
+        stats['Support'] = stats['Total'] / len(client_data)
         stats['HitRate'] = stats['Hits'] / stats['Total']
         stats['Lift'] = stats['HitRate'] / overall_hit_rate if overall_hit_rate > 0 else 0
-        stats['Client'] = client
         stats['Pattern_Type'] = pat_col
-        all_stats.append(stats)
+        stats['Client'] = client
+        client_stats.append(stats)
 
-# Combine all clients and patterns
-pattern_stats_all = pd.concat(all_stats, axis=0)
-pattern_stats_all.to_csv("audited_patterns_all_clients.csv", index=False)
+client_stats_df = pd.concat(client_stats, axis=0)
 
-print("✅ Pattern mining completed for all clients. CSV saved as 'audited_patterns_all_clients.csv'")
+# -----------------------------
+# Step 5: Test patterns on non-audited claims
+# -----------------------------
+unaudited['Pattern_Basic'] = unaudited.apply(lambda x: make_pattern(x), axis=1)
+unaudited['Pattern_Standard'] = unaudited.apply(lambda x: make_pattern(x, dx_cols=['diag1']), axis=1)
+unaudited['Pattern_Dx'] = unaudited.apply(lambda x: make_pattern(x, dx_cols=dx_cols), axis=1)
+unaudited['Pattern_Full'] = unaudited.apply(lambda x: make_pattern(x, dx_cols=dx_cols, proc_cols=proc_cols, include_proc=True), axis=1)
+unaudited['Pattern_LOS'] = unaudited.apply(lambda x: str(x['soi_indicator']) + "_" + str(x['dischargestatuscode']) + "_" + str(x['LOS_bin']), axis=1)
+unaudited['Pattern_Paid'] = unaudited.apply(lambda x: str(x['soi_indicator']) + "_" + str(x['dischargestatuscode']) + "_" + str(x['Paid_bin']), axis=1)
+unaudited['Pattern_LOS_Paid'] = unaudited.apply(lambda x: str(x['soi_indicator']) + "_" + str(x['dischargestatuscode']) + "_" + str(x['LOS_bin']) + "_" + str(x['Paid_bin']), axis=1)
 
+test_stats = []
+for pat_col in pattern_cols:
+    stats = unaudited.groupby(pat_col).agg(
+        NonAuditedCount=('soi_indicator','count')
+    ).reset_index()
+    stats['Pattern_Type'] = pat_col
+    test_stats.append(stats)
 
+unaudited_stats_df = pd.concat(test_stats, axis=0)
 
+# -----------------------------
+# Step 6: Save outputs
+# -----------------------------
+global_stats_df.to_csv("global_pattern_stats.csv", index=False)
+client_stats_df.to_csv("client_pattern_stats.csv", index=False)
+unaudited_stats_df.to_csv("unaudited_pattern_test.csv", index=False)
 
-Priority	Pattern Combination (implemented)	Notes	Column Name in Code
-1	soi_indicator + dischargestatuscode	High support, coarse overview	Pattern_Basic
-1	soi_indicator + dischargestatuscode + diag1	Standard SME pattern	Pattern_Standard
-2	soi_indicator + dischargestatuscode + diag1–diag6	Adds clinical specificity, medium support	Pattern_Dx
-2	soi_indicator + dischargestatuscode + diag1–diag6 + proc1–proc6	More granular, medium support	Pattern_Full
-2	clientname + soi_indicator + dischargestatuscode	Client-specific lift/support	Pattern_Client
-3	(originally time-specific: loadmonth)	Removed	—
-4	soi_indicator + dischargestatuscode + LOS_bin	Secondary signal	Pattern_LOS
-4	soi_indicator + dischargestatuscode + totalpaidamount_bin	Secondary signal	Pattern_Paid
-4	soi_indicator + dischargestatuscode + LOS_bin + totalpaidamount_bin	Exploratory only	Pattern_LOS_Paid
-
+print("✅ Global, client, and unaudited pattern stats saved.")
