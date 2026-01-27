@@ -87,3 +87,18 @@ pattern_stats_all = pd.concat(all_stats, axis=0)
 pattern_stats_all.to_csv("audited_patterns_all_clients.csv", index=False)
 
 print("✅ Pattern mining completed for all clients. CSV saved as 'audited_patterns_all_clients.csv'")
+
+
+
+
+Priority	Pattern Combination (implemented)	Notes	Column Name in Code
+1	soi_indicator + dischargestatuscode	High support, coarse overview	Pattern_Basic
+1	soi_indicator + dischargestatuscode + diag1	Standard SME pattern	Pattern_Standard
+2	soi_indicator + dischargestatuscode + diag1–diag6	Adds clinical specificity, medium support	Pattern_Dx
+2	soi_indicator + dischargestatuscode + diag1–diag6 + proc1–proc6	More granular, medium support	Pattern_Full
+2	clientname + soi_indicator + dischargestatuscode	Client-specific lift/support	Pattern_Client
+3	(originally time-specific: loadmonth)	Removed	—
+4	soi_indicator + dischargestatuscode + LOS_bin	Secondary signal	Pattern_LOS
+4	soi_indicator + dischargestatuscode + totalpaidamount_bin	Secondary signal	Pattern_Paid
+4	soi_indicator + dischargestatuscode + LOS_bin + totalpaidamount_bin	Exploratory only	Pattern_LOS_Paid
+
