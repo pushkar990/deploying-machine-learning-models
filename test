@@ -1,18 +1,5 @@
-Pattern_Basic         : aprdrgcode + soi_indicator + dischargestatuscode
-Pattern_Standard      : aprdrgcode + soi_indicator + dischargestatuscode + diag1
-Pattern_Dx            : aprdrgcode + soi_indicator + dischargestatuscode + diag1–diag6
-Pattern_Full          : aprdrgcode + soi_indicator + dischargestatuscode + diag1–diag6 + proc1–proc6
-Pattern_LOS           : soi_indicator + dischargestatuscode + LOS_bin
-Pattern_Paid          : soi_indicator + dischargestatuscode + Paid_bin
-Pattern_LOS_Paid      : soi_indicator + dischargestatuscode + LOS_bin + Paid_bin
-Pattern_Drg_LOS       : aprdrgcode + soi_indicator + dischargestatuscode + LOS_bin
-Pattern_Drg_Paid      : aprdrgcode + soi_indicator + dischargestatuscode + Paid_bin
-Pattern_Drg_LOS_Paid  : aprdrgcode + soi_indicator + dischargestatuscode + LOS_bin + Paid_bin
-
-
-
-import pandas as pd  # For data manipulation
-import numpy as np   # For numerical operations
+import pandas as pd
+import numpy as np
 
 # -----------------------------
 # Step 0: Load data
@@ -31,14 +18,14 @@ proc_cols = [f'proc{i}' for i in range(1,7)]
 # Step 1: Bin numeric features
 # -----------------------------
 # Bin LOS into categories for pattern analysis
-los_bins = [0,2,5,10,15,1000]  # Bin edges
-los_labels = ['VeryShort','Short','Medium','Long','VeryLong']  # Labels
+los_bins = [0,2,5,10,15,1000]  
+los_labels = ['VeryShort','Short','Medium','Long','VeryLong']
 audited['LOS_bin'] = pd.cut(audited['los'], bins=los_bins, labels=los_labels)
 unaudited['LOS_bin'] = pd.cut(unaudited['los'], bins=los_bins, labels=los_labels)
 
 # Bin total paid amount into categories
-paid_bins = [0,10000,50000,100000,1000000]  # Bin edges
-paid_labels = ['Low','Medium','High','VeryHigh']  # Labels
+paid_bins = [0,10000,50000,100000,1000000]
+paid_labels = ['Low','Medium','High','VeryHigh']
 audited['Paid_bin'] = pd.cut(audited['totalpaidamount'], bins=paid_bins, labels=paid_labels)
 unaudited['Paid_bin'] = pd.cut(unaudited['totalpaidamount'], bins=paid_bins, labels=paid_labels)
 
@@ -46,18 +33,10 @@ unaudited['Paid_bin'] = pd.cut(unaudited['totalpaidamount'], bins=paid_bins, lab
 # Step 2: Helper function to create patterns
 # -----------------------------
 def make_pattern(row, prefix_cols=[], dx_cols=[], proc_cols=[], include_proc=False, add_los=False, add_paid=False):
-    """
-    Constructs a pattern string from multiple columns.
-    prefix_cols: always included (e.g., aprdrgcode, soi_indicator, discharge)
-    dx_cols: list of diagnosis columns
-    proc_cols: list of procedure columns
-    include_proc: if True, include proc_cols
-    add_los: if True, include LOS_bin
-    add_paid: if True, include Paid_bin
-    """
-    parts = []  # List to hold pattern components
+    """Constructs a pattern string from multiple columns"""
+    parts = []
 
-    # Add prefix columns
+    # Add prefix columns (e.g., aprdrgcode + soi + discharge)
     for c in prefix_cols:
         parts.append(str(row[c]))
 
@@ -79,33 +58,30 @@ def make_pattern(row, prefix_cols=[], dx_cols=[], proc_cols=[], include_proc=Fal
     if add_paid:
         parts.append(str(row['Paid_bin']))
 
-    # Join all parts with "_" separator
+    # Join all parts with "_"
     return "_".join(parts)
 
 # -----------------------------
 # Step 3: Create patterns for audited data
 # -----------------------------
-# Main clinical patterns
-audited['Pattern_Basic'] = audited.apply(lambda x: make_pattern(x, prefix_cols=['aprdrgcode','soi_indicator','dischargestatuscode']), axis=1)
-audited['Pattern_Standard'] = audited.apply(lambda x: make_pattern(x, prefix_cols=['aprdrgcode','soi_indicator','dischargestatuscode'], dx_cols=['diag1']), axis=1)
+audited['Pattern_Basic'] = audited.apply(lambda x: make_pattern(x, prefix_cols=['aprdrgcode','soi_indicator']), axis=1)
+audited['Pattern_Standard'] = audited.apply(lambda x: make_pattern(x, prefix_cols=['aprdrgcode','soi_indicator','dischargestatuscode']), axis=1)
 audited['Pattern_Dx'] = audited.apply(lambda x: make_pattern(x, prefix_cols=['aprdrgcode','soi_indicator','dischargestatuscode'], dx_cols=dx_cols), axis=1)
 audited['Pattern_Full'] = audited.apply(lambda x: make_pattern(x, prefix_cols=['aprdrgcode','soi_indicator','dischargestatuscode'], dx_cols=dx_cols, proc_cols=proc_cols, include_proc=True), axis=1)
 
-# Secondary signals based on LOS / Paid / Discharge
-audited['Pattern_LOS'] = audited.apply(lambda x: make_pattern(x, prefix_cols=['soi_indicator','dischargestatuscode'], add_los=True), axis=1)
-audited['Pattern_Paid'] = audited.apply(lambda x: make_pattern(x, prefix_cols=['soi_indicator','dischargestatuscode'], add_paid=True), axis=1)
-audited['Pattern_LOS_Paid'] = audited.apply(lambda x: make_pattern(x, prefix_cols=['soi_indicator','dischargestatuscode'], add_los=True, add_paid=True), axis=1)
-
-# Hybrid patterns combining APR-DRG with LOS/Paid
 audited['Pattern_Drg_LOS'] = audited.apply(lambda x: make_pattern(x, prefix_cols=['aprdrgcode','soi_indicator','dischargestatuscode'], add_los=True), axis=1)
 audited['Pattern_Drg_Paid'] = audited.apply(lambda x: make_pattern(x, prefix_cols=['aprdrgcode','soi_indicator','dischargestatuscode'], add_paid=True), axis=1)
 audited['Pattern_Drg_LOS_Paid'] = audited.apply(lambda x: make_pattern(x, prefix_cols=['aprdrgcode','soi_indicator','dischargestatuscode'], add_los=True, add_paid=True), axis=1)
 
-# List of all patterns for iteration
+audited['Pattern_LOS'] = audited.apply(lambda x: make_pattern(x, prefix_cols=['soi_indicator','dischargestatuscode'], add_los=True), axis=1)
+audited['Pattern_Paid'] = audited.apply(lambda x: make_pattern(x, prefix_cols=['soi_indicator','dischargestatuscode'], add_paid=True), axis=1)
+audited['Pattern_LOS_Paid'] = audited.apply(lambda x: make_pattern(x, prefix_cols=['soi_indicator','dischargestatuscode'], add_los=True, add_paid=True), axis=1)
+
+# List of all patterns in priority order
 pattern_cols = [
     'Pattern_Basic','Pattern_Standard','Pattern_Dx','Pattern_Full',
-    'Pattern_LOS','Pattern_Paid','Pattern_LOS_Paid',
-    'Pattern_Drg_LOS','Pattern_Drg_Paid','Pattern_Drg_LOS_Paid'
+    'Pattern_Drg_LOS','Pattern_Drg_Paid','Pattern_Drg_LOS_Paid',
+    'Pattern_LOS','Pattern_Paid','Pattern_LOS_Paid'
 ]
 
 # -----------------------------
@@ -114,16 +90,15 @@ pattern_cols = [
 global_stats = []
 
 for pat_col in pattern_cols:
-    # Group by pattern
     stats = audited.groupby(pat_col).agg(
-        Total=('find','count'),  # number of claims with this pattern
-        Hits=('find','sum')      # number of claims with findings
+        Total=('find','count'),
+        Hits=('find','sum')
     ).reset_index()
     
-    overall_hit_rate = audited['find'].mean()  # baseline hit rate across all claims
-    stats['Support'] = stats['Total'] / len(audited)  # pattern frequency / total claims
-    stats['HitRate'] = stats['Hits'] / stats['Total']  # pattern-specific hit rate
-    stats['Lift'] = stats['HitRate'] / overall_hit_rate if overall_hit_rate > 0 else 0  # relative to baseline
+    overall_hit_rate = audited['find'].mean()
+    stats['Support'] = stats['Total'] / len(audited)
+    stats['HitRate'] = stats['Hits'] / stats['Total']
+    stats['Lift'] = stats['HitRate'] / overall_hit_rate if overall_hit_rate > 0 else 0
     stats['Pattern_Type'] = pat_col
     stats['Client'] = 'ALL'
     global_stats.append(stats)
@@ -137,7 +112,7 @@ client_stats = []
 
 for client in audited['clientname'].unique():
     client_data = audited[audited['clientname'] == client].copy()
-    overall_hit_rate = client_data['find'].mean()  # baseline per client
+    overall_hit_rate = client_data['find'].mean()
     
     for pat_col in pattern_cols:
         stats = client_data.groupby(pat_col).agg(
@@ -157,22 +132,21 @@ client_stats_df = pd.concat(client_stats, axis=0)
 # Step 6: Test patterns on non-audited claims
 # -----------------------------
 for pat_col in pattern_cols:
-    # Generate same pattern structure for unaudited claims
-    # Note: for simplicity, only uses the same columns logic as audited patterns
     if 'Drg' in pat_col:
         prefix_cols = ['aprdrgcode','soi_indicator','dischargestatuscode']
     elif 'LO' in pat_col or 'Paid' in pat_col:
         prefix_cols = ['soi_indicator','dischargestatuscode']
     else:
-        prefix_cols = ['aprdrgcode','soi_indicator','dischargestatuscode']
-    
+        prefix_cols = ['aprdrgcode','soi_indicator']
+
     dx_list = dx_cols if 'Dx' in pat_col and 'Full' not in pat_col else []
     include_proc = 'Full' in pat_col
     add_los = 'LOS' in pat_col
     add_paid = 'Paid' in pat_col
 
     unaudited[pat_col] = unaudited.apply(
-        lambda x: make_pattern(x, prefix_cols=prefix_cols, dx_cols=dx_list, proc_cols=proc_cols, include_proc=include_proc, add_los=add_los, add_paid=add_paid),
+        lambda x: make_pattern(x, prefix_cols=prefix_cols, dx_cols=dx_list, proc_cols=proc_cols,
+                               include_proc=include_proc, add_los=add_los, add_paid=add_paid),
         axis=1
     )
 
