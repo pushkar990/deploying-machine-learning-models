@@ -1,15 +1,13 @@
-| Pattern Name         | Columns Included                                                             | Notes                                       |
-| -------------------- | ---------------------------------------------------------------------------- | ------------------------------------------- |
-| Pattern_Basic        | aprdrgcode + soi_indicator + dischargestatuscode                             | High support, coarse overview               |
-| Pattern_Standard     | aprdrgcode + soi_indicator + dischargestatuscode + diag1                     | Standard SME pattern                        |
-| Pattern_Dx           | aprdrgcode + soi_indicator + dischargestatuscode + diag1–diag6               | Adds clinical specificity, medium support   |
-| Pattern_Full         | aprdrgcode + soi_indicator + dischargestatuscode + diag1–diag6 + proc1–proc6 | More granular, medium support               |
-| Pattern_LOS          | soi_indicator + dischargestatuscode + LOS_bin                                | Secondary signal                            |
-| Pattern_Paid         | soi_indicator + dischargestatuscode + Paid_bin                               | Secondary signal                            |
-| Pattern_LOS_Paid     | soi_indicator + dischargestatuscode + LOS_bin + Paid_bin                     | Exploratory only                            |
-| Pattern_Drg_LOS      | aprdrgcode + soi_indicator + dischargestatuscode + LOS_bin                   | Combines clinical + LOS, secondary          |
-| Pattern_Drg_Paid     | aprdrgcode + soi_indicator + dischargestatuscode + Paid_bin                  | Combines clinical + Paid, secondary         |
-| Pattern_Drg_LOS_Paid | aprdrgcode + soi_indicator + dischargestatuscode + LOS_bin + Paid_bin        | Combines clinical + LOS + Paid, exploratory |
+Pattern_Basic         : aprdrgcode + soi_indicator + dischargestatuscode
+Pattern_Standard      : aprdrgcode + soi_indicator + dischargestatuscode + diag1
+Pattern_Dx            : aprdrgcode + soi_indicator + dischargestatuscode + diag1–diag6
+Pattern_Full          : aprdrgcode + soi_indicator + dischargestatuscode + diag1–diag6 + proc1–proc6
+Pattern_LOS           : soi_indicator + dischargestatuscode + LOS_bin
+Pattern_Paid          : soi_indicator + dischargestatuscode + Paid_bin
+Pattern_LOS_Paid      : soi_indicator + dischargestatuscode + LOS_bin + Paid_bin
+Pattern_Drg_LOS       : aprdrgcode + soi_indicator + dischargestatuscode + LOS_bin
+Pattern_Drg_Paid      : aprdrgcode + soi_indicator + dischargestatuscode + Paid_bin
+Pattern_Drg_LOS_Paid  : aprdrgcode + soi_indicator + dischargestatuscode + LOS_bin + Paid_bin
 
 
 
