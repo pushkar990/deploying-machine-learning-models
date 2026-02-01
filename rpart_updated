@@ -1,0 +1,189 @@
+Updated 
+
+# ----------------------------
+# 1️⃣ Install and import packages
+# ----------------------------
+# pip install rpy2   # Uncomment if rpy2 not installed
+
+import pandas as pd
+import rpy2.robjects as ro
+from rpy2.robjects import pandas2ri
+from rpy2.robjects.packages import importr
+
+# Activate automatic conversion between pandas and R dataframes
+pandas2ri.activate()
+
+# Import rpart package from R
+rpart = importr('rpart')
+
+# ----------------------------
+# 2️⃣ Prepare the dataset
+# ----------------------------
+# Filter only SME-reviewed claims for pattern discovery
+df_audit = df[
+    (df['sme_selected']==1) &
+    ((df['substatusfind']==1) | (df['substatusnofind']==1)) &
+    (df['soi_indicator'].isin([1,2,3,4]))
+].copy()
+
+# Define categorical columns (handled as factors in R)
+categorical_cols = ['discharge_statuscode','aprdrgcode','diag1','proc1']
+for c in categorical_cols:
+    df_audit[c] = df_audit[c].astype('category')
+
+# Convert the filtered dataframe to R dataframe
+rdf = pandas2ri.py2rpy(df_audit)
+
+# ----------------------------
+# 3️⃣ Build the decision tree in R
+# ----------------------------
+formula = ro.Formula(
+    'finding_target ~ discharge_statuscode + aprdrgcode + diag1 + proc1 + '
+    'age + totalpaidamount + lengthofstay + cc_count + mcc_count + soi_indicator'
+)
+
+tree = rpart.rpart(
+    formula,
+    data=rdf,
+    method="class",  # classification tree
+    control=rpart.rpart_control(maxdepth=4, minbucket=50)
+)
+
+# ----------------------------
+# 4️⃣ Apply tree to full dataset to get leaf IDs
+# ----------------------------
+rdf_full = pandas2ri.py2rpy(df)
+leaf_ids = ro.r['predict'](tree, rdf_full, type="where")
+leaf_ids = pandas2ri.rpy2py(leaf_ids)
+df['leaf_id'] = leaf_ids
+
+# ----------------------------
+# 5️⃣ Compute overall metrics per leaf
+# ----------------------------
+
+# Audited pattern metrics
+audited_rows = df[
+    (df['sme_selected']==1) &
+    ((df['substatusfind']==1) | (df['substatusnofind']==1)) &
+    (df['soi_indicator'].isin([1,2,3,4]))
+].copy()
+
+pattern_metrics = audited_rows.groupby('leaf_id').agg(
+    find_cnt_pattern=('substatusfind','sum'),
+    nofind_cnt_pattern=('substatusnofind','sum'),
+    sme_cnt_pattern=('sme_selected','count')
+).reset_index()
+
+pattern_metrics['hitrate_pattern'] = pattern_metrics['find_cnt_pattern'] / (
+    pattern_metrics['find_cnt_pattern'] + pattern_metrics['nofind_cnt_pattern']
+)
+pattern_metrics['sme_sel_rate_pattern'] = pattern_metrics['sme_cnt_pattern'] / (
+    pattern_metrics['find_cnt_pattern'] + pattern_metrics['nofind_cnt_pattern']
+)
+
+# Overall metrics for all claims
+metrics = df.groupby('leaf_id').agg(
+    total_cnt=('finding_target','size'),
+    sme_cnt=('sme_selected','sum'),
+    find_cnt=('finding_target','sum'),
+    total_savings=('savings','sum')
+).reset_index()
+
+metrics['hitrate'] = metrics['find_cnt'] / metrics['sme_cnt']
+metrics['sme_sel_rate'] = metrics['sme_cnt'] / metrics['total_cnt']
+metrics['support'] = metrics['total_cnt'] / len(df)
+
+baseline = df[df['sme_selected']==1]['finding_target'].mean()
+metrics['lift'] = metrics['hitrate'] / baseline
+
+metrics['missed_cnt'] = metrics['total_cnt'] - metrics['sme_cnt']
+metrics['expected_missed_findings'] = metrics['missed_cnt'] * metrics['hitrate']
+
+df = df.merge(metrics[['leaf_id','hitrate']], on='leaf_id', how='left')
+df['expected_savings'] = df['hitrate'] * df['savings']
+missed_df = df[df['sme_selected']==0]
+expected_savings_leaf = missed_df.groupby('leaf_id')['expected_savings'].sum().reset_index()
+metrics = metrics.merge(expected_savings_leaf, on='leaf_id', how='left')
+metrics['expected_savings'] = metrics['expected_savings'].fillna(0)
+
+# Merge audited pattern metrics
+metrics = metrics.merge(pattern_metrics, on='leaf_id', how='left')
+
+# ----------------------------
+# 6️⃣ Extract human-readable rules per leaf
+# ----------------------------
+rpart_plot = importr('rpart.plot')
+rules_str = ro.r['capture.output'](rpart_plot.rpart.rules(tree))
+rules_list = list(rules_str)
+
+leaf_rules = pd.DataFrame({'leaf_rule': rules_list})
+leaf_rules['leaf_id'] = metrics['leaf_id'].values
+metrics = metrics.merge(leaf_rules, on='leaf_id', how='left')
+
+# ----------------------------
+# 7️⃣ Client-specific metrics
+# ----------------------------
+client_metrics = []
+for client in df['clientname'].unique():
+    df_client = df[df['clientname']==client].copy()
+
+    # Overall leaf metrics
+    client_leaf = df_client.groupby('leaf_id').agg(
+        total_cnt=('finding_target','size'),
+        sme_cnt=('sme_selected','sum'),
+        find_cnt=('finding_target','sum')
+    ).reset_index()
+
+    client_leaf['hitrate'] = client_leaf['find_cnt'] / client_leaf['sme_cnt']
+    client_leaf['sme_sel_rate'] = client_leaf['sme_cnt'] / client_leaf['total_cnt']
+    client_leaf['support'] = client_leaf['total_cnt'] / len(df_client)
+
+    baseline_client = df_client[df_client['sme_selected']==1]['finding_target'].mean()
+    client_leaf['lift'] = client_leaf['hitrate'] / baseline_client
+    client_leaf['missed_cnt'] = client_leaf['total_cnt'] - client_leaf['sme_cnt']
+    client_leaf['expected_missed_findings'] = client_leaf['missed_cnt'] * client_leaf['hitrate']
+
+    df_client = df_client.merge(client_leaf[['leaf_id','hitrate']], on='leaf_id', how='left')
+    df_client['expected_savings'] = df_client['hitrate'] * df_client['savings']
+    missed_client = df_client[df_client['sme_selected']==0]
+    expected_savings_client = missed_client.groupby('leaf_id')['expected_savings'].sum().reset_index()
+    client_leaf = client_leaf.merge(expected_savings_client, on='leaf_id', how='left')
+    client_leaf['expected_savings'] = client_leaf['expected_savings'].fillna(0)
+
+    # Audited pattern metrics for client
+    audited_client_rows = df_client[
+        (df_client['sme_selected']==1) &
+        ((df_client['substatusfind']==1) | (df_client['substatusnofind']==1)) &
+        (df_client['soi_indicator'].isin([1,2,3,4]))
+    ].copy()
+
+    client_audited_metrics = audited_client_rows.groupby('leaf_id').agg(
+        find_cnt_pattern=('substatusfind','sum'),
+        nofind_cnt_pattern=('substatusnofind','sum'),
+        sme_cnt_pattern=('sme_selected','count')
+    ).reset_index()
+
+    client_audited_metrics['hitrate_pattern'] = client_audited_metrics['find_cnt_pattern'] / (
+        client_audited_metrics['find_cnt_pattern'] + client_audited_metrics['nofind_cnt_pattern']
+    )
+    client_audited_metrics['sme_sel_rate_pattern'] = client_audited_metrics['sme_cnt_pattern'] / (
+        client_audited_metrics['find_cnt_pattern'] + client_audited_metrics['nofind_cnt_pattern']
+    )
+
+    client_leaf = client_leaf.merge(client_audited_metrics, on='leaf_id', how='left')
+    client_leaf['clientname'] = client
+    client_metrics.append(client_leaf)
+
+client_metrics = pd.concat(client_metrics)
+
+# ----------------------------
+# 8️⃣ Outputs
+# ----------------------------
+# Overall metrics
+print(metrics)
+
+# Client-specific metrics
+print(client_metrics)
+
+# Human-readable rules
+print(metrics[['leaf_id','leaf_rule']])
