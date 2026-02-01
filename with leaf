@@ -1,3 +1,87 @@
+ ----------------------------
+# 5️⃣ Compute overall metrics per leaf (SME-ready)
+# ----------------------------
+
+# Assign leaf IDs to all rows
+rdf_full = pandas2ri.py2rpy(df)
+leaf_ids = ro.r['predict'](tree, rdf_full, type="where")
+leaf_ids = pandas2ri.rpy2py(leaf_ids)
+df['leaf_id'] = leaf_ids  # assign leaf_id to original df
+
+# Aggregate metrics per leaf
+metrics = df.groupby('leaf_id').agg(
+    total_cnt=('finding_target','size'),          # total claims in leaf
+    sme_cnt=('sme_selected','sum'),               # SME-reviewed claims
+    find_cnt=('substatus_find','sum'),            # number of finds (SME-reviewed only)
+    nofind_cnt=('substatus_nofind','sum'),        # number of nofinds
+    total_savings=('savings','sum')               # total savings
+).reset_index()
+
+# Compute hitrate and SME selection rate safely
+metrics['hitrate'] = metrics.apply(
+    lambda row: row['find_cnt']/row['sme_cnt'] if row['sme_cnt']>0 else 0,
+    axis=1
+)
+metrics['sme_sel_rate'] = metrics.apply(
+    lambda row: row['sme_cnt']/row['total_cnt'] if row['total_cnt']>0 else 0,
+    axis=1
+)
+
+# Support, lift, missed opportunity
+metrics['support'] = metrics['total_cnt'] / len(df)
+baseline = df[df['sme_selected']==1]['substatus_find'].mean()
+metrics['lift'] = metrics['hitrate'] / baseline
+metrics['missed_cnt'] = metrics['total_cnt'] - metrics['sme_cnt']
+metrics['expected_missed_findings'] = metrics['missed_cnt'] * metrics['hitrate']
+
+# Expected savings for missed claims
+df = df.merge(metrics[['leaf_id','hitrate']], on='leaf_id', how='left')
+df['expected_savings'] = df['hitrate'] * df['savings']
+missed_df = df[df['sme_selected']==0]
+expected_savings_leaf = missed_df.groupby('leaf_id')['expected_savings'].sum().reset_index()
+metrics = metrics.merge(expected_savings_leaf, on='leaf_id', how='left')
+metrics['expected_savings'] = metrics['expected_savings'].fillna(0)
+
+# ----------------------------
+# 6️⃣ Extract human-readable leaf rules
+# ----------------------------
+rpart_plot = importr('rpart.plot')
+
+# Capture rules with node numbers included
+rules_str = ro.r['capture.output'](rpart_plot.rpart_rules(tree, nn=True))
+rules_list = list(rules_str)
+
+# Parse leaf node IDs from the rule text
+import re
+leaf_nodes = []
+leaf_texts = []
+for rule in rules_list:
+    match = re.match(r"(\d+)\)", rule)
+    if match:
+        leaf_nodes.append(int(match.group(1)))
+        leaf_texts.append(rule)
+
+# Build leaf rules DataFrame
+leaf_rules = pd.DataFrame({
+    'leaf_id': leaf_nodes,
+    'leaf_rule': leaf_texts
+})
+
+# Merge safely with metrics
+metrics = metrics.merge(leaf_rules, on='leaf_id', how='left')
+
+# ----------------------------
+# ✅ Overall SME-ready table
+# ----------------------------
+# metrics now contains:
+# - total_cnt, sme_cnt, find_cnt, nofind_cnt
+# - hitrate, sme_sel_rate, support, lift
+# - missed_cnt, expected_missed_findings, expected_savings
+# - leaf_rule (human-readable)
+print(metrics)
+
+
+
 
 
 Step6
