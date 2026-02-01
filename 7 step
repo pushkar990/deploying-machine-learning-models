@@ -1,3 +1,20 @@
+# Step 6 - Reliable leaf rules using path.rpart
+rpart_base = importr('rpart')
+
+# Get paths to leaves
+paths = ro.r['path.rpart'](tree, nodes=ro.r['row.names'](tree.rx2('frame')))  # all leaf nodes
+
+# Convert R list to Python
+leaf_rules = []
+for node, conditions in paths.items():
+    rule_text = " & ".join(list(conditions))
+    leaf_rules.append({'leaf_id': int(node), 'leaf_rule': rule_text})
+
+leaf_rules_df = pd.DataFrame(leaf_rules)
+
+# Merge with metrics
+metrics = metrics.merge(leaf_rules_df, on='leaf_id', how='left')
+
 
 # ----------------------------
 # 6️⃣ Extract human-readable rules per leaf (fixed)
