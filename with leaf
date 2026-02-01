@@ -1,3 +1,40 @@
+
+
+Step6
+
+# ----------------------------
+# 6️⃣ Extract human-readable rules per leaf (robust fix)
+# ----------------------------
+rpart_plot = importr('rpart.plot')  # Make sure rpart.plot is installed in R
+
+# 1️⃣ Get rules for leaf nodes only
+rules_str = ro.r['capture.output'](rpart_plot.rpart_rules(tree))
+rules_list = list(rules_str)
+
+# 2️⃣ Get tree frame to identify leaf nodes and their IDs
+frame = tree.rx2('frame')                 # R frame of tree
+is_leaf = frame.rx2('var') == '<leaf>'   # Boolean mask for leaves
+leaf_ids = list(frame.rx2('row.names')[is_leaf])  # leaf IDs as strings
+
+# 3️⃣ Create DataFrame mapping leaf IDs to rules
+leaf_rules = pd.DataFrame({
+    'node_id': [int(x) for x in leaf_ids],  # convert R row names to integers
+    'leaf_rule': rules_list
+})
+
+# 4️⃣ Merge leaf rules into metrics safely
+metrics = metrics.merge(leaf_rules, on='node_id', how='left')
+
+# ✅ Result:
+# - Leaves get human-readable 'leaf_rule'
+# - Internal nodes have NaN in 'leaf_rule'
+# - All other metrics remain intact
+
+
+
+
+
+
 # ----------------------------
 # 1️⃣ Install and import packages
 # ----------------------------
