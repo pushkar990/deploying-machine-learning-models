@@ -1,3 +1,43 @@
+
+# ----------------------------
+# 6️⃣ Extract human-readable rules per leaf (fixed)
+# ----------------------------
+# Use labels.rpart to get the leaf paths/rules
+# This works even if rpart.rules gave blank output
+
+# Import base rpart functions
+rpart_base = importr('rpart')
+
+# Get leaf labels (one rule per leaf)
+leaf_labels = ro.r['labels'](tree)  # returns R vector of leaf rules
+
+# Convert to Python list
+leaf_rules_list = list(leaf_labels)
+
+# Create a DataFrame mapping leaf_id to leaf_rule
+# Ensure number of rules matches metrics['leaf_id']
+leaf_rules_df = pd.DataFrame({
+    'leaf_id': metrics['leaf_id'].values,
+    'leaf_rule': leaf_rules_list
+})
+
+# Merge leaf rules with metrics
+metrics = metrics.merge(leaf_rules_df, on='leaf_id', how='left')
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 # In R, get rules with leaf IDs
 rules_str = ro.r['capture.output'](rpart_plot.rpart.rules(tree, nn=True))  # nn=True includes node numbers
 rules_list = list(rules_str)
