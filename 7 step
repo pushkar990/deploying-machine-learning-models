@@ -1,0 +1,17 @@
+# In R, get rules with leaf IDs
+rules_str = ro.r['capture.output'](rpart_plot.rpart.rules(tree, nn=True))  # nn=True includes node numbers
+rules_list = list(rules_str)
+
+# Parse rules into leaf_id and rule string
+leaf_rules = []
+for line in rules_list:
+    if ':' in line:  # typical format: "1) condition1 & condition2 : class=1"
+        parts = line.split(':')
+        node = parts[0].split(')')[0].strip()  # leaf_id / node number
+        rule_text = parts[0].split(')')[1].strip() + ' : ' + parts[1].strip()
+        leaf_rules.append({'leaf_id': int(node), 'leaf_rule': rule_text})
+
+leaf_rules = pd.DataFrame(leaf_rules)
+
+# Merge with metrics
+metrics = metrics.merge(leaf_rules, on='leaf_id', how='left')
