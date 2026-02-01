@@ -1,0 +1,172 @@
+ ----------------------------
+# 1️⃣ Install and import packages
+# ----------------------------
+# pip install rpy2   # Uncomment if not installed
+
+import pandas as pd
+import rpy2.robjects as ro
+from rpy2.robjects import pandas2ri
+from rpy2.robjects.packages import importr
+
+# Activate automatic conversion between pandas and R dataframes
+pandas2ri.activate()
+
+# Import rpart package from R for decision trees
+rpart = importr('rpart')
+
+# ----------------------------
+# 2️⃣ Prepare the dataset
+# ----------------------------
+# Keep only SME-reviewed claims for building the tree
+df_audit = df[df['sme_selected']==1].copy()
+
+# Specify categorical columns to be treated as factors in R
+categorical_cols = ['discharge_statuscode','aprdrgcode','diag1','proc1']
+for c in categorical_cols:
+    df_audit[c] = df_audit[c].astype('category')  # Convert to categorical
+
+# Convert pandas dataframe to R dataframe for rpart
+rdf = pandas2ri.py2rpy(df_audit)
+
+# ----------------------------
+# 3️⃣ Build the decision tree in R
+# ----------------------------
+# Formula: target ~ all features (categorical + continuous)
+formula = ro.Formula(
+    'finding_target ~ discharge_statuscode + aprdrgcode + diag1 + proc1 + '
+    'age + totalpaidamount + lengthofstay + cc_count + mcc_count + soi_indicator'
+)
+
+# Train the tree for pattern discovery
+# method="class" for classification; maxdepth & minbucket for interpretability
+tree = rpart.rpart(
+    formula,
+    data=rdf,
+    method="class",
+    control=rpart.rpart_control(maxdepth=4, minbucket=50)
+)
+
+# ----------------------------
+# 4️⃣ Apply tree to full dataset to get leaf IDs
+# ----------------------------
+# Convert the full dataset to R dataframe
+rdf_full = pandas2ri.py2rpy(df)
+
+# Predict leaf assignment for every claim
+leaf_ids = ro.r['predict'](tree, rdf_full, type="where")
+
+# Convert leaf IDs back to pandas and assign to df
+leaf_ids = pandas2ri.rpy2py(leaf_ids)
+df['leaf_id'] = leaf_ids  # Each leaf_id represents a pattern
+
+# ----------------------------
+# 5️⃣ Compute overall metrics per leaf/pattern
+# ----------------------------
+metrics = df.groupby('leaf_id').agg(
+    total_cnt=('finding_target','size'),         # Total claims in this pattern
+    sme_cnt=('sme_selected','sum'),              # SME-reviewed claims
+    find_cnt=('finding_target','sum'),           # Number of findings
+    nofind_cnt=(lambda x: (df.loc[x.index,'substatusnofind']).sum()),  # Number of non-findings
+    total_savings=('savings','sum')              # Total savings in this leaf
+).reset_index()
+
+# Hit rate: findings / SME-reviewed claims
+metrics['hitrate'] = metrics['find_cnt'] / metrics['sme_cnt']
+
+# SME selection rate: SME-reviewed / total claims in pattern
+metrics['sme_sel_rate'] = metrics['sme_cnt'] / metrics['total_cnt']
+
+# Support: fraction of all claims in this pattern
+metrics['support'] = metrics['total_cnt'] / len(df)
+
+# Lift: hit rate relative to overall baseline
+baseline = df[df['sme_selected']==1]['finding_target'].mean()
+metrics['lift'] = metrics['hitrate'] / baseline
+
+# Missed opportunity: claims not reviewed by SME
+metrics['missed_cnt'] = metrics['total_cnt'] - metrics['sme_cnt']
+
+# Expected missed findings = missed_cnt * pattern hit rate
+metrics['expected_missed_findings'] = metrics['missed_cnt'] * metrics['hitrate']
+
+# Expected savings for missed claims: multiply hit rate by savings of unreviewed claims
+df = df.merge(metrics[['leaf_id','hitrate']], on='leaf_id', how='left')
+df['expected_savings'] = df['hitrate'] * df['savings']
+missed_df = df[df['sme_selected']==0]
+expected_savings_leaf = missed_df.groupby('leaf_id')['expected_savings'].sum().reset_index()
+metrics = metrics.merge(expected_savings_leaf, on='leaf_id', how='left')
+metrics['expected_savings'] = metrics['expected_savings'].fillna(0)
+
+# ----------------------------
+# 6️⃣ Extract human-readable rules per leaf
+# ----------------------------
+rpart_plot = importr('rpart.plot')  # Make sure rpart.plot is installed in R
+rules_str = ro.r['capture.output'](rpart_plot.rpart.rules(tree))
+rules_list = list(rules_str)
+
+# Combine leaf rules with metrics
+leaf_rules = pd.DataFrame({'leaf_rule': rules_list})
+leaf_rules['leaf_id'] = metrics['leaf_id'].values
+metrics = metrics.merge(leaf_rules, on='leaf_id', how='left')
+
+# ----------------------------
+# 7️⃣ Compute client-specific metrics for each pattern
+# ----------------------------
+client_metrics = []
+for client in df['clientname'].unique():
+    df_client = df[df['clientname']==client].copy()
+    
+    # Aggregate metrics per leaf for this client
+    client_leaf = df_client.groupby('leaf_id').agg(
+        total_cnt=('finding_target','size'),
+        sme_cnt=('sme_selected','sum'),
+        find_cnt=('finding_target','sum'),
+        nofind_cnt=(lambda x: (df_client.loc[x.index,'substatusnofind']).sum())
+    ).reset_index()
+    
+    # Only calculate metrics where SME reviewed at least 1 claim
+    client_leaf = client_leaf[client_leaf.sme_cnt>0]
+    
+    # Hit rate for this client and leaf
+    client_leaf['hitrate'] = client_leaf['find_cnt']/client_leaf['sme_cnt']
+    
+    # SME selection rate
+    client_leaf['sme_sel_rate'] = client_leaf['sme_cnt']/client_leaf['total_cnt']
+    
+    # Support for this client
+    client_leaf['support'] = client_leaf['total_cnt']/len(df_client)
+    
+    # Lift for this client relative to client-specific baseline
+    baseline_client = df_client[df_client['sme_selected']==1]['finding_target'].mean()
+    client_leaf['lift'] = client_leaf['hitrate']/baseline_client
+    
+    # Missed opportunity for client
+    client_leaf['missed_cnt'] = client_leaf['total_cnt'] - client_leaf['sme_cnt']
+    client_leaf['expected_missed_findings'] = client_leaf['missed_cnt'] * client_leaf['hitrate']
+    
+    # Expected savings for unreviewed claims
+    df_client = df_client.merge(client_leaf[['leaf_id','hitrate']], on='leaf_id', how='left')
+    df_client['expected_savings'] = df_client['hitrate'] * df_client['savings']
+    missed_client = df_client[df_client['sme_selected']==0]
+    expected_savings_client = missed_client.groupby('leaf_id')['expected_savings'].sum().reset_index()
+    client_leaf = client_leaf.merge(expected_savings_client, on='leaf_id', how='left')
+    client_leaf['expected_savings'] = client_leaf['expected_savings'].fillna(0)
+    
+    client_leaf['clientname'] = client
+    client_metrics.append(client_leaf)
+
+# Concatenate all client-specific metrics
+client_metrics = pd.concat(client_metrics)
+
+# ----------------------------
+# 8️⃣ Outputs
+# ----------------------------
+# Overall pattern-level metrics
+print(metrics)
+
+# Client-specific pattern-level metrics
+print(client_metrics)
+
+# Human-readable rules for reference
+print(metrics[['leaf_id','leaf_rule']])
+Regards,
