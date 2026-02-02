@@ -1,0 +1,169 @@
+# ----------------------------
+# 1️⃣ Install and import packages
+# ----------------------------
+# pip install rpy2   # Uncomment if not installed
+
+import pandas as pd
+import rpy2.robjects as ro
+from rpy2.robjects import pandas2ri
+from rpy2.robjects.packages import importr
+
+# Activate automatic conversion between pandas and R dataframes
+pandas2ri.activate()
+
+# Import rpart package from R
+rpart = importr('rpart')
+
+# ----------------------------
+# 2️⃣ Prepare the dataset
+# ----------------------------
+# Filter only SME-reviewed claims for pattern discovery
+df_audit = df[df['sme_selected']==1].copy()
+
+# Define categorical columns (handled as factors in R)
+categorical_cols = ['discharge_statuscode','aprdrgcode','diag1','proc1']
+for c in categorical_cols:
+    df_audit[c] = df_audit[c].astype('category')  # convert to categorical
+
+# Convert the filtered dataframe to R dataframe
+rdf = pandas2ri.py2rpy(df_audit)
+
+# ----------------------------
+# 3️⃣ Build the decision tree in R
+# ----------------------------
+formula = ro.Formula('finding_target ~ discharge_statuscode + aprdrgcode + diag1 + proc1 + age + totalpaidamount + lengthofstay + cc_count + mcc_count + soi_indicator')
+
+tree = rpart.rpart(
+    formula,
+    data=rdf,
+    method="class",
+    control=rpart.rpart_control(maxdepth=4, minbucket=50)
+)
+
+# ----------------------------
+# 4️⃣ Apply tree to full dataset to get leaf IDs
+# ----------------------------
+rdf_full = pandas2ri.py2rpy(df)  # convert full dataset to R
+leaf_ids = ro.r['predict'](tree, rdf_full, type="where")
+leaf_ids = pandas2ri.rpy2py(leaf_ids)
+df['leaf_id'] = leaf_ids
+
+# ----------------------------
+# Helper function to filter rows by tree path
+# ----------------------------
+def filter_rows_by_path(df_input, conditions):
+    """Filter rows matching all conditions for a leaf node."""
+    df_filtered = df_input.copy()
+    for cond in conditions:
+        col, val = cond.split('==')
+        col = col.strip()
+        val = val.strip()
+        df_filtered = df_filtered[df_filtered[col]==val]
+    return df_filtered
+
+# ----------------------------
+# 5️⃣ Overall metrics per leaf
+# ----------------------------
+metrics = df.groupby('leaf_id').agg(
+    total_cnt=('finding_target','size'),
+    sme_cnt=('sme_selected','sum'),
+    find_cnt=('substatus_find','sum'),
+    nofind_cnt=('substatus_nofind','sum'),
+    total_savings=('savings','sum')
+).reset_index()
+
+metrics['hitrate'] = metrics['find_cnt'] / (metrics['find_cnt'] + metrics['nofind_cnt'])
+metrics['sme_sel_rate'] = metrics['sme_cnt'] / metrics['total_cnt']
+metrics['missed_cnt'] = metrics['total_cnt'] - metrics['sme_cnt']
+metrics['expected_missed_findings'] = metrics['missed_cnt'] * metrics['hitrate']
+metrics['expected_savings'] = metrics['hitrate'] * metrics['total_savings']
+metrics['support'] = metrics['total_cnt'] / len(df)
+
+baseline = df[df['sme_selected']==1]['substatus_find'].mean()
+metrics['lift'] = metrics['hitrate'] / baseline
+
+# ----------------------------
+# 6️⃣ Extract human-readable rules per leaf
+# ----------------------------
+rpart_plot = importr('rpart.plot')
+rules_str = ro.r['rpart_rules'](tree)
+rules_list = list(rules_str)
+
+# Make sure lengths match: map leaf_id to rules safely
+leaf_rules = pd.DataFrame({'leaf_rule': rules_list})
+if len(leaf_rules) != len(metrics):
+    leaf_rules = leaf_rules.reindex(metrics.index)
+metrics = pd.concat([metrics, leaf_rules], axis=1)
+
+# ----------------------------
+# 7️⃣ Client-specific metrics per leaf
+# ----------------------------
+client_metrics_list = []
+clients = df['clientname'].unique()
+
+# Placeholder node info (if using rpart, extract node_numbers, parent_ids, is_leaf_flags, levels, all_paths)
+# For simplicity, we reuse leaf_ids as node_id
+node_numbers = metrics['leaf_id'].tolist()
+parent_ids = [None]*len(node_numbers)  # Placeholder if you want hierarchy
+is_leaf_flags = [True]*len(node_numbers)
+levels = [1]*len(node_numbers)  # simple level
+all_paths = [['dummy']] * len(node_numbers)  # Placeholder path; replace if you have real splits
+
+for client in clients:
+    df_client = df[df['clientname']==client].copy()
+    baseline_client = df_client[df_client['sme_selected']==1]['substatus_find'].mean()
+    
+    node_metrics_client = []
+    for node_id in node_numbers:
+        df_node = df_client[df_client['leaf_id']==node_id]
+        
+        total_cnt = len(df_node)
+        sme_cnt = df_node['sme_selected'].sum()
+        find_cnt = df_node['substatus_find'].sum()
+        nofind_cnt = df_node['substatus_nofind'].sum()
+        total_savings = df_node['savings'].sum()
+        
+        hitrate = find_cnt / (find_cnt + nofind_cnt) if (find_cnt + nofind_cnt) > 0 else 0
+        sme_sel_rate = sme_cnt / total_cnt if total_cnt > 0 else 0
+        missed_cnt = total_cnt - sme_cnt
+        expected_missed_findings = missed_cnt * hitrate
+        expected_savings = (df_node['savings'] * hitrate).sum()
+        support = total_cnt / len(df_client)
+        lift = hitrate / baseline_client if baseline_client > 0 else 0
+        
+        node_metrics_client.append({
+            'clientname': client,
+            'node_id': node_id,
+            'parent_id': None,
+            'level': 1,
+            'is_leaf': True,
+            'leaf_rule': metrics.loc[metrics['leaf_id']==node_id,'leaf_rule'].values[0],
+            'total_cnt': total_cnt,
+            'sme_cnt': sme_cnt,
+            'find_cnt': find_cnt,
+            'nofind_cnt': nofind_cnt,
+            'hitrate': hitrate,
+            'sme_sel_rate': sme_sel_rate,
+            'missed_cnt': missed_cnt,
+            'expected_missed_findings': expected_missed_findings,
+            'expected_savings': expected_savings,
+            'support': support,
+            'lift': lift
+        })
+    
+    client_metrics_list.append(pd.DataFrame(node_metrics_client))
+
+client_metrics_all_nodes = pd.concat(client_metrics_list, ignore_index=True)
+client_metrics_all_nodes = client_metrics_all_nodes.sort_values(['clientname','node_id']).reset_index(drop=True)
+
+# ----------------------------
+# 8️⃣ Outputs
+# ----------------------------
+print("✅ Overall metrics per leaf:")
+print(metrics)
+
+print("\n✅ Client-specific metrics per leaf:")
+print(client_metrics_all_nodes)
+
+print("\n✅ Leaf rules reference:")
+print(metrics[['leaf_id','leaf_rule']])
