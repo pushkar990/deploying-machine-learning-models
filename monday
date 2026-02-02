@@ -1,3 +1,91 @@
+ ----------------------------
+# 1️⃣ Import packages
+# ----------------------------
+import pandas as pd
+import numpy as np
+import rpy2.robjects as ro
+from rpy2.robjects import pandas2ri
+from rpy2.robjects.packages import importr
+
+pandas2ri.activate()
+rpart = importr('rpart')
+
+# ----------------------------
+# 2️⃣ Prepare audited dataset
+# ----------------------------
+df_audit = df[df['sme_selected']==1].copy()
+cat_cols = ['discharge_statuscode','aprdrgcode','diag1','proc1']
+df_audit[cat_cols] = df_audit[cat_cols].astype(str)
+df[cat_cols] = df[cat_cols].astype(str)
+rdf = pandas2ri.py2rpy(df_audit)
+
+# ----------------------------
+# 3️⃣ Build decision tree (audited only)
+# ----------------------------
+formula = ro.Formula("""
+finding_target ~ discharge_statuscode + aprdrgcode + diag1 + proc1 +
+age + totalpaidamount + lengthofstay + cc_count + mcc_count + soi_indicator
+""")
+tree = rpart.rpart(
+    formula,
+    data=rdf,
+    method="class",
+    control=rpart.rpart_control(maxdepth=4,minbucket=50)
+)
+
+# ----------------------------
+# 4️⃣ Extract tree frame + rules for all nodes
+# ----------------------------
+frame = pandas2ri.rpy2py(ro.r['as.data.frame'](tree.rx2('frame')))
+frame['node_id'] = frame.index.astype(int)
+frame = frame.reset_index(drop=True)
+
+# Function to get human-readable rule for any node
+get_rule = ro.r("""
+function(tree, node){
+  p <- path.rpart(tree, nodes=node)
+  if(length(p) == 0) return("TRUE")
+  paste(p[[1]][-1], collapse=" & ")
+}
+""")
+frame['rule'] = frame['node_id'].apply(lambda n: get_rule(tree,int(n))[0])
+
+# Parent-child and level
+frame['parent_id'] = frame['node_id'].apply(lambda x: x//2 if x != 1 else None)
+frame['level'] = frame['node_id'].apply(lambda x: int(np.floor(np.log2(x))) + 1)
+
+# ----------------------------
+# 5️⃣ Map audited rows to all ancestors
+# ----------------------------
+def ancestors(n):
+    a = [n]
+    while n > 1:
+        n //= 2
+        a.append(n)
+    return a
+
+# Merge rules + parent + level
+overall_metrics = overall.merge(frame[['node_id','rule','parent_id','level']], on='node_id')
+overall_metrics = overall_metrics.sort_values(['level','node_id']).reset_index(drop=True)
+
+print("✅ Overall audited-only tree with all splits")
+print(overall_metrics)
+    # Merge rules + parent + level
+    client_node_metrics = client_node_metrics.merge(frame[['node_id','rule','parent_id','level']], on='node_id', how='left')
+    client_node_metrics['clientname'] = client
+    
+    client_metrics_list.append(client_node_metrics)
+
+client_metrics_all_nodes = pd.concat(client_metrics_list, ignore_index=True)
+client_metrics_all_nodes = client_metrics_all_nodes.sort_values(['clientname','level','node_id']).reset_index(drop=True)
+
+print("\n✅ Client-level audited-only tree with all splits")
+print(client_metrics_all_nodes)
+
+
+
+
+
 # ----------------------------
 # 1️⃣ Install & import packages
 # ----------------------------
