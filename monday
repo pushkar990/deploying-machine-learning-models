@@ -1,0 +1,174 @@
+mport pandas as pd
+from sklearn.tree import DecisionTreeClassifier, _tree
+
+# -----------------------------
+# 1️⃣ Encode categorical features
+# -----------------------------
+feature_cols = ['diag1', 'proc1', 'drgcode']  # Add numeric features if needed
+categorical_cols = ['diag1', 'proc1', 'drgcode']
+
+# Copy data to avoid overwriting
+audited_encoded = audited.copy()
+category_maps = {}  # to map back codes to original values
+
+for col in categorical_cols:
+    audited_encoded[col] = audited_encoded[col].astype('category')
+    category_maps[col] = dict(enumerate(audited_encoded[col].cat.categories))
+    audited_encoded[col] = audited_encoded[col].cat.codes
+
+# -----------------------------
+# 2️⃣ Build decision tree
+# -----------------------------
+X = audited_encoded[feature_cols]
+y = audited_encoded['finding_target']
+
+fitted_tree = DecisionTreeClassifier(
+    max_depth=3,       # adjust depth as needed
+    min_samples_leaf=10,
+    random_state=42
+)
+fitted_tree.fit(X, y)
+
+# -----------------------------
+# 3️⃣ Function to extract patterns from tree
+# -----------------------------
+def extract_tree_patterns(tree, feature_names, category_maps=None):
+    """
+    Extract patterns from a fitted sklearn DecisionTreeClassifier.
+    Returns list of dicts: node_id, conditions, rule_desc
+    """
+    tree_ = tree.tree_
+    patterns = []
+
+    def recurse(node, node_id='1', conditions={}, rule_desc=''):
+        if tree_.feature[node] != _tree.TREE_UNDEFINED:
+            feature = feature_names[tree_.feature[node]]
+            threshold = tree_.threshold[node]
+
+            # Left child
+            left_cond = conditions.copy()
+            left_cond[feature] = f"<= {threshold}"
+            # Map back categories for readability if categorical
+            left_desc = rule_desc
+            if category_maps and feature in category_maps:
+                # approximate: use <= floor(threshold)
+                code_thresh = int(threshold)
+                cat_val = category_maps[feature].get(code_thresh, code_thresh)
+                left_desc = f"{rule_desc} AND {feature} <= {cat_val}" if rule_desc else f"{feature} <= {cat_val}"
+            else:
+                left_desc = f"{rule_desc} AND {feature} <= {threshold}" if rule_desc else f"{feature} <= {threshold}"
+
+            recurse(tree_.children_left[node], node_id=f"{node_id}.1", conditions=left_cond, rule_desc=left_desc)
+
+            # Right child
+            right_cond = conditions.copy()
+            right_cond[feature] = f"> {threshold}"
+            right_desc = rule_desc
+            if category_maps and feature in category_maps:
+                code_thresh = int(threshold)
+                cat_val = category_maps[feature].get(code_thresh, code_thresh)
+                right_desc = f"{rule_desc} AND {feature} > {cat_val}" if rule_desc else f"{feature} > {cat_val}"
+            else:
+                right_desc = f"{rule_desc} AND {feature} > {threshold}" if rule_desc else f"{feature} > {threshold}"
+
+            recurse(tree_.children_right[node], node_id=f"{node_id}.2", conditions=right_cond, rule_desc=right_desc)
+        else:
+            # Leaf node
+            patterns.append({
+                'node': node_id,
+                'conditions': conditions,
+                'rule_desc': rule_desc
+            })
+
+    recurse(0)
+    return patterns
+
+# -----------------------------
+# 4️⃣ Function to calculate metrics
+# -----------------------------
+def calculate_metrics(audited_df, patterns):
+    results = []
+
+    # Overall metrics
+    for pattern in patterns:
+        cond = pattern['conditions']
+        temp = audited_df.copy()
+        for col, val in cond.items():
+            if '<=' in val:
+                thresh = float(val.split('<=')[1])
+                temp = temp[temp[col] <= thresh]
+            elif '>' in val:
+                thresh = float(val.split('>')[1])
+                temp = temp[temp[col] > thresh]
+            else:
+                temp = temp[temp[col] == val]
+
+        total_cnt = len(temp)
+        sub_find_cnt = temp['sub_find'].sum()
+        sub_nofind_cnt = temp['sub_nofind'].sum()
+
+        hitrate = sub_find_cnt / (sub_find_cnt + sub_nofind_cnt) if (sub_find_cnt + sub_nofind_cnt) > 0 else 0
+        sme_sel_rate = temp['sme_selected'].sum() / total_cnt if total_cnt > 0 else 0
+        support = total_cnt / len(audited_df)
+        lift = hitrate / (audited_df['sub_find'].sum() / len(audited_df)) if len(audited_df) > 0 else 0
+
+        results.append({
+            'node': pattern['node'],
+            'client': 'Overall',
+            'total_cnt': total_cnt,
+            'hitrate': hitrate,
+            'sme_sel_rate': sme_sel_rate,
+            'support': support,
+            'lift': lift,
+            'rule_desc': pattern['rule_desc']
+        })
+
+    # Client-level metrics
+    clients = audited_df['client_name'].unique()
+    for pattern in patterns:
+        cond = pattern['conditions']
+        for client in clients:
+            temp = audited_df[audited_df['client_name'] == client].copy()
+            for col, val in cond.items():
+                if '<=' in val:
+                    thresh = float(val.split('<=')[1])
+                    temp = temp[temp[col] <= thresh]
+                elif '>' in val:
+                    thresh = float(val.split('>')[1])
+                    temp = temp[temp[col] > thresh]
+                else:
+                    temp = temp[temp[col] == val]
+
+            total_cnt = len(temp)
+            sub_find_cnt = temp['sub_find'].sum()
+            sub_nofind_cnt = temp['sub_nofind'].sum()
+
+            hitrate = sub_find_cnt / (sub_find_cnt + sub_nofind_cnt) if (sub_find_cnt + sub_nofind_cnt) > 0 else 0
+            sme_sel_rate = temp['sme_selected'].sum() / total_cnt if total_cnt > 0 else 0
+            support = total_cnt / len(audited_df)
+            lift = hitrate / (audited_df['sub_find'].sum() / len(audited_df)) if len(audited_df) > 0 else 0
+
+            results.append({
+                'node': pattern['node'],
+                'client': client,
+                'total_cnt': total_cnt,
+                'hitrate': hitrate,
+                'sme_sel_rate': sme_sel_rate,
+                'support': support,
+                'lift': lift,
+                'rule_desc': pattern['rule_desc']
+            })
+
+    return pd.DataFrame(results)
+
+# -----------------------------
+# 5️⃣ Run everything
+# -----------------------------
+patterns = extract_tree_patterns(fitted_tree, feature_cols, category_maps)
+metrics_df = calculate_metrics(audited_encoded, patterns)
+
+# -----------------------------
+# 6️⃣ Display / export
+# -----------------------------
+print(metrics_df)
+# metrics_df.to_csv("audited_patterns_metrics.csv", index=False)
