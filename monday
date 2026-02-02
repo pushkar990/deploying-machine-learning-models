@@ -1,174 +1,155 @@
-mport pandas as pd
-from sklearn.tree import DecisionTreeClassifier, _tree
+# ----------------------------
+# 1️⃣ Install & import packages
+# ----------------------------
+# pip install rpy2   # Uncomment if not installed
 
-# -----------------------------
-# 1️⃣ Encode categorical features
-# -----------------------------
-feature_cols = ['diag1', 'proc1', 'drgcode']  # Add numeric features if needed
-categorical_cols = ['diag1', 'proc1', 'drgcode']
+import pandas as pd
+import numpy as np
+import rpy2.robjects as ro
+from rpy2.robjects import pandas2ri
+from rpy2.robjects.packages import importr
 
-# Copy data to avoid overwriting
-audited_encoded = audited.copy()
-category_maps = {}  # to map back codes to original values
+pandas2ri.activate()
+rpart = importr('rpart')
 
-for col in categorical_cols:
-    audited_encoded[col] = audited_encoded[col].astype('category')
-    category_maps[col] = dict(enumerate(audited_encoded[col].cat.categories))
-    audited_encoded[col] = audited_encoded[col].cat.codes
+# ----------------------------
+# 2️⃣ Prepare audited dataset
+# ----------------------------
+df_audit = df[df['sme_selected']==1].copy()
 
-# -----------------------------
-# 2️⃣ Build decision tree
-# -----------------------------
-X = audited_encoded[feature_cols]
-y = audited_encoded['finding_target']
+# Convert categorical columns to string (R factors)
+cat_cols = ['discharge_statuscode','aprdrgcode','diag1','proc1']
+df_audit[cat_cols] = df_audit[cat_cols].astype(str)
+df[cat_cols] = df[cat_cols].astype(str)
 
-fitted_tree = DecisionTreeClassifier(
-    max_depth=3,       # adjust depth as needed
-    min_samples_leaf=10,
-    random_state=42
+rdf = pandas2ri.py2rpy(df_audit)
+
+# ----------------------------
+# 3️⃣ Build decision tree (audited only)
+# ----------------------------
+formula = ro.Formula("""
+finding_target ~ discharge_statuscode + aprdrgcode + diag1 + proc1 +
+age + totalpaidamount + lengthofstay + cc_count + mcc_count + soi_indicator
+""")
+
+tree = rpart.rpart(
+    formula,
+    data=rdf,
+    method="class",
+    control=rpart.rpart_control(maxdepth=4,minbucket=50)
 )
-fitted_tree.fit(X, y)
 
-# -----------------------------
-# 3️⃣ Function to extract patterns from tree
-# -----------------------------
-def extract_tree_patterns(tree, feature_names, category_maps=None):
-    """
-    Extract patterns from a fitted sklearn DecisionTreeClassifier.
-    Returns list of dicts: node_id, conditions, rule_desc
-    """
-    tree_ = tree.tree_
-    patterns = []
+# ----------------------------
+# 4️⃣ Extract node frame + rule descriptions
+# ----------------------------
+frame = pandas2ri.rpy2py(ro.r['as.data.frame'](tree.rx2('frame')))
+frame['node_id'] = frame.index.astype(int)
+frame = frame.reset_index(drop=True)
 
-    def recurse(node, node_id='1', conditions={}, rule_desc=''):
-        if tree_.feature[node] != _tree.TREE_UNDEFINED:
-            feature = feature_names[tree_.feature[node]]
-            threshold = tree_.threshold[node]
+get_rule = ro.r("""
+function(tree,node){
+ p <- path.rpart(tree,nodes=node)
+ if(length(p)==0) return("TRUE")
+ paste(p[[1]][-1],collapse=" & ")
+}
+""")
 
-            # Left child
-            left_cond = conditions.copy()
-            left_cond[feature] = f"<= {threshold}"
-            # Map back categories for readability if categorical
-            left_desc = rule_desc
-            if category_maps and feature in category_maps:
-                # approximate: use <= floor(threshold)
-                code_thresh = int(threshold)
-                cat_val = category_maps[feature].get(code_thresh, code_thresh)
-                left_desc = f"{rule_desc} AND {feature} <= {cat_val}" if rule_desc else f"{feature} <= {cat_val}"
-            else:
-                left_desc = f"{rule_desc} AND {feature} <= {threshold}" if rule_desc else f"{feature} <= {threshold}"
+frame['rule'] = [get_rule(tree,int(n))[0] for n in frame['node_id']]
 
-            recurse(tree_.children_left[node], node_id=f"{node_id}.1", conditions=left_cond, rule_desc=left_desc)
+# ----------------------------
+# 5️⃣ Map audited rows to all ancestors
+# ----------------------------
+def ancestors(n):
+    a = [n]
+    while n > 1:
+        n //= 2
+        a.append(n)
+    return a
 
-            # Right child
-            right_cond = conditions.copy()
-            right_cond[feature] = f"> {threshold}"
-            right_desc = rule_desc
-            if category_maps and feature in category_maps:
-                code_thresh = int(threshold)
-                cat_val = category_maps[feature].get(code_thresh, code_thresh)
-                right_desc = f"{rule_desc} AND {feature} > {cat_val}" if rule_desc else f"{feature} > {cat_val}"
-            else:
-                right_desc = f"{rule_desc} AND {feature} > {threshold}" if rule_desc else f"{feature} > {threshold}"
+# Predict leaf ids for audited data
+leaf_ids_audit = np.array(ro.r['predict'](tree,pandas2ri.py2rpy(df_audit),type="where"))
+df_audit['leaf_id'] = leaf_ids_audit
+df_audit['node_id'] = df_audit['leaf_id'].apply(ancestors)
+df_long = df_audit.explode('node_id')
 
-            recurse(tree_.children_right[node], node_id=f"{node_id}.2", conditions=right_cond, rule_desc=right_desc)
-        else:
-            # Leaf node
-            patterns.append({
-                'node': node_id,
-                'conditions': conditions,
-                'rule_desc': rule_desc
-            })
+# ----------------------------
+# 6️⃣ Overall audited metrics per node
+# ----------------------------
+baseline = df_audit['substatus_find'].mean()
+total_audited = len(df_audit)
 
-    recurse(0)
-    return patterns
+overall = (
+    df_long.groupby('node_id')
+    .agg(
+        total_cnt=('leaf_id','count'),
+        sme_cnt=('sme_selected','sum'),
+        find_cnt=('substatus_find','sum'),
+        nofind_cnt=('substatus_nofind','sum'),
+        total_savings=('savings','sum')
+    )
+    .reset_index()
+)
 
-# -----------------------------
-# 4️⃣ Function to calculate metrics
-# -----------------------------
-def calculate_metrics(audited_df, patterns):
-    results = []
+overall['hitrate'] = overall['find_cnt'] / (overall['find_cnt'] + overall['nofind_cnt'])
+overall['sme_sel_rate'] = overall['sme_cnt'] / total_audited
+overall['lift'] = overall['hitrate'] / baseline
+overall['expected_savings'] = overall['total_savings'] * overall['hitrate']
+overall['missed_cnt'] = overall['total_cnt'] - overall['sme_cnt']
+overall['expected_missed_findings'] = overall['missed_cnt'] * overall['hitrate']
 
-    # Overall metrics
-    for pattern in patterns:
-        cond = pattern['conditions']
-        temp = audited_df.copy()
-        for col, val in cond.items():
-            if '<=' in val:
-                thresh = float(val.split('<=')[1])
-                temp = temp[temp[col] <= thresh]
-            elif '>' in val:
-                thresh = float(val.split('>')[1])
-                temp = temp[temp[col] > thresh]
-            else:
-                temp = temp[temp[col] == val]
+overall['parent_id'] = overall['node_id'].apply(lambda x: x//2 if x != 1 else None)
+overall['level'] = overall['node_id'].apply(lambda x: int(np.floor(np.log2(x))) + 1)
 
-        total_cnt = len(temp)
-        sub_find_cnt = temp['sub_find'].sum()
-        sub_nofind_cnt = temp['sub_nofind'].sum()
+overall_metrics = overall.merge(frame[['node_id','rule']], on='node_id')
+overall_metrics = overall_metrics.sort_values(['level','node_id']).reset_index(drop=True)
 
-        hitrate = sub_find_cnt / (sub_find_cnt + sub_nofind_cnt) if (sub_find_cnt + sub_nofind_cnt) > 0 else 0
-        sme_sel_rate = temp['sme_selected'].sum() / total_cnt if total_cnt > 0 else 0
-        support = total_cnt / len(audited_df)
-        lift = hitrate / (audited_df['sub_find'].sum() / len(audited_df)) if len(audited_df) > 0 else 0
+print("✅ Overall audited-only tree table")
+print(overall_metrics[['node_id','parent_id','level','rule','total_cnt',
+                       'sme_cnt','find_cnt','nofind_cnt','hitrate',
+                       'sme_sel_rate','lift','expected_savings',
+                       'missed_cnt','expected_missed_findings']])
 
-        results.append({
-            'node': pattern['node'],
-            'client': 'Overall',
-            'total_cnt': total_cnt,
-            'hitrate': hitrate,
-            'sme_sel_rate': sme_sel_rate,
-            'support': support,
-            'lift': lift,
-            'rule_desc': pattern['rule_desc']
-        })
+# ----------------------------
+# 7️⃣ Client-level audited metrics per node
+# ----------------------------
+clients = df_long['clientname'].unique()
+client_metrics_list = []
 
-    # Client-level metrics
-    clients = audited_df['client_name'].unique()
-    for pattern in patterns:
-        cond = pattern['conditions']
-        for client in clients:
-            temp = audited_df[audited_df['client_name'] == client].copy()
-            for col, val in cond.items():
-                if '<=' in val:
-                    thresh = float(val.split('<=')[1])
-                    temp = temp[temp[col] <= thresh]
-                elif '>' in val:
-                    thresh = float(val.split('>')[1])
-                    temp = temp[temp[col] > thresh]
-                else:
-                    temp = temp[temp[col] == val]
+for client in clients:
+    df_client = df_long[df_long['clientname']==client].copy()
+    baseline_client = df_client['substatus_find'].mean()
+    total_client_audited = len(df_client)
+    
+    client_node_metrics = (
+        df_client.groupby('node_id')
+        .agg(
+            total_cnt=('leaf_id','count'),
+            sme_cnt=('sme_selected','sum'),
+            find_cnt=('substatus_find','sum'),
+            nofind_cnt=('substatus_nofind','sum'),
+            total_savings=('savings','sum')
+        )
+        .reset_index()
+    )
+    
+    client_node_metrics['hitrate'] = client_node_metrics['find_cnt'] / (client_node_metrics['find_cnt'] + client_node_metrics['nofind_cnt'])
+    client_node_metrics['sme_sel_rate'] = client_node_metrics['sme_cnt'] / total_client_audited
+    client_node_metrics['lift'] = client_node_metrics['hitrate'] / baseline_client if baseline_client>0 else 0
+    client_node_metrics['expected_savings'] = client_node_metrics['total_savings'] * client_node_metrics['hitrate']
+    client_node_metrics['missed_cnt'] = client_node_metrics['total_cnt'] - client_node_metrics['sme_cnt']
+    client_node_metrics['expected_missed_findings'] = client_node_metrics['missed_cnt'] * client_node_metrics['hitrate']
+    
+    client_node_metrics = client_node_metrics.merge(frame[['node_id','rule']], on='node_id', how='left')
+    client_node_metrics['parent_id'] = client_node_metrics['node_id'].apply(lambda x: x//2 if x!=1 else None)
+    client_node_metrics['level'] = client_node_metrics['node_id'].apply(lambda x: int(np.floor(np.log2(x)))+1)
+    client_node_metrics['clientname'] = client
+    
+    client_metrics_list.append(client_node_metrics)
 
-            total_cnt = len(temp)
-            sub_find_cnt = temp['sub_find'].sum()
-            sub_nofind_cnt = temp['sub_nofind'].sum()
+client_metrics_all_nodes = pd.concat(client_metrics_list, ignore_index=True)
+client_metrics_all_nodes = client_metrics_all_nodes.sort_values(['clientname','level','node_id']).reset_index(drop=True)
 
-            hitrate = sub_find_cnt / (sub_find_cnt + sub_nofind_cnt) if (sub_find_cnt + sub_nofind_cnt) > 0 else 0
-            sme_sel_rate = temp['sme_selected'].sum() / total_cnt if total_cnt > 0 else 0
-            support = total_cnt / len(audited_df)
-            lift = hitrate / (audited_df['sub_find'].sum() / len(audited_df)) if len(audited_df) > 0 else 0
-
-            results.append({
-                'node': pattern['node'],
-                'client': client,
-                'total_cnt': total_cnt,
-                'hitrate': hitrate,
-                'sme_sel_rate': sme_sel_rate,
-                'support': support,
-                'lift': lift,
-                'rule_desc': pattern['rule_desc']
-            })
-
-    return pd.DataFrame(results)
-
-# -----------------------------
-# 5️⃣ Run everything
-# -----------------------------
-patterns = extract_tree_patterns(fitted_tree, feature_cols, category_maps)
-metrics_df = calculate_metrics(audited_encoded, patterns)
-
-# -----------------------------
-# 6️⃣ Display / export
-# -----------------------------
-print(metrics_df)
-# metrics_df.to_csv("audited_patterns_metrics.csv", index=False)
+print("\n✅ Client-level audited-only tree table")
+print(client_metrics_all_nodes[['clientname','node_id','parent_id','level','rule','total_cnt',
+                                'sme_cnt','find_cnt','nofind_cnt','hitrate','sme_sel_rate',
+                                'lift','expected_savings','missed_cnt','expected_missed_findings']])
